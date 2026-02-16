@@ -1,0 +1,948 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local UserInputService = game:GetService("UserInputService")
+local TeleportService = game:GetService("TeleportService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+local humanoid = character:WaitForChild("Humanoid")
+
+-- ==================== OPTIMIZED CONFIGURATION ====================
+local CONFIG = {
+	pizzaPosition = Vector3.new(-53.46, 4.46, -44.47),
+	bikePosition = Vector3.new(-56.15, 4.46, -26.26),
+	customerName = "PizzaPlanetDeliveryCustomer",
+	customerOffset = Vector3.new(0, 0, 5),
+	heightClimbStep = 1.5,
+	maxHeightClimbs = 10,
+	ePressCount = 3,
+	ePressDelay = 0.25,
+	enterPressDelay = 0.25,
+	walkSpeed = 45,
+	minHeight = 4.5,
+	maxSearchDepth = 5,
+	maxRetryAttempts = 10,
+	retryDelay = 0.3,
+	waitAfterAction = 0.5,
+	deliveryCheckDelay = 1.0,
+	updateInterval = 0.05
+}
+
+local state = {
+	farming = false,
+	stopped = false,
+	noclipEnabled = false,
+	onBike = false,
+	currentCycle = 0,
+	autoEnterEnabled = false,
+	guiMinimized = false,
+	positionLocked = false
+}
+
+-- ==================== POSITION LOCK SYSTEM (PIZZA PICKUP ONLY) ====================
+local positionLockConnection = nil
+
+local function lockPosition(position)
+	if positionLockConnection then
+		positionLockConnection:Disconnect()
+	end
+	
+	state.positionLocked = true
+	
+	positionLockConnection = RunService.Heartbeat:Connect(function()
+		if not state.positionLocked then return end
+		if not humanoidRootPart or not humanoidRootPart.Parent then return end
+		
+		humanoidRootPart.CFrame = CFrame.new(position)
+		humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+		humanoidRootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+		
+		if humanoid then
+			humanoid.PlatformStand = true
+		end
+	end)
+end
+
+local function unlockPosition()
+	state.positionLocked = false
+	
+	if positionLockConnection then
+		positionLockConnection:Disconnect()
+		positionLockConnection = nil
+	end
+	
+	if humanoid then
+		humanoid.PlatformStand = false
+	end
+end
+
+-- ==================== TOGGLE CIRCLE ====================
+local function createToggleCircle()
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "ToggleCircleGUI"
+	screenGui.ResetOnSpawn = false
+	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	screenGui.Parent = playerGui
+	
+	local toggleButton = Instance.new("TextButton")
+	toggleButton.Name = "ToggleButton"
+	toggleButton.Position = UDim2.new(0, 10, 0.5, -30)
+	toggleButton.Size = UDim2.new(0, 45, 0, 45)
+	toggleButton.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
+	toggleButton.BorderSizePixel = 2
+	toggleButton.BorderColor3 = Color3.fromRGB(255, 255, 255)
+	toggleButton.Text = "🍕"
+	toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	toggleButton.TextSize = 24
+	toggleButton.Font = Enum.Font.SourceSansBold
+	toggleButton.Visible = false
+	toggleButton.Active = true
+	toggleButton.Draggable = true
+	toggleButton.Parent = screenGui
+	
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = toggleButton
+	
+	return toggleButton
+end
+
+-- ==================== CONTROL GUI ====================
+local function createControlGUI()
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "PizzaAutoFarmGUI"
+	screenGui.ResetOnSpawn = false
+	screenGui.Parent = playerGui
+	
+	-- Main Frame
+	local mainFrame = Instance.new("Frame")
+	mainFrame.Name = "MainFrame"
+	mainFrame.Size = UDim2.new(0, 280, 0, 410)
+	mainFrame.Position = UDim2.new(0, 10, 0.5, -205)
+	mainFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	mainFrame.BorderSizePixel = 2
+	mainFrame.BorderColor3 = Color3.fromRGB(255, 255, 255)
+	mainFrame.Active = true
+	mainFrame.Draggable = true
+	mainFrame.Parent = screenGui
+	
+	-- Title Bar
+	local titleLabel = Instance.new("TextLabel")
+	titleLabel.Name = "Title"
+	titleLabel.Size = UDim2.new(1, -25, 0, 25)
+	titleLabel.Position = UDim2.new(0, 0, 0, 0)
+	titleLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	titleLabel.BorderSizePixel = 0
+	titleLabel.Text = " 🏡 [BLOXBURG] Delivery Farming"
+	titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	titleLabel.TextSize = 14
+	titleLabel.Font = Enum.Font.SourceSansBold
+	titleLabel.Parent = mainFrame
+	
+	-- Minimize Button
+	local minimizeButton = Instance.new("TextButton")
+	minimizeButton.Name = "MinimizeButton"
+	minimizeButton.Size = UDim2.new(0, 25, 0, 25)
+	minimizeButton.Position = UDim2.new(1, -25, 0, 0)
+	minimizeButton.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
+	minimizeButton.BorderSizePixel = 0
+	minimizeButton.Text = "−"
+	minimizeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	minimizeButton.TextSize = 18
+	minimizeButton.Font = Enum.Font.SourceSansBold
+	minimizeButton.Parent = mainFrame
+	
+	-- ===== AUTO FARM SECTION =====
+	local autoFarmSection = Instance.new("TextLabel")
+	autoFarmSection.Name = "AutoFarmSection"
+	autoFarmSection.Size = UDim2.new(1, -12, 0, 25)
+	autoFarmSection.Position = UDim2.new(0, 6, 0, 30)
+	autoFarmSection.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
+	autoFarmSection.BorderSizePixel = 0
+	autoFarmSection.Text = "🍕 PIZZA DELIVERY AUTO FARM"
+	autoFarmSection.TextColor3 = Color3.fromRGB(255, 255, 255)
+	autoFarmSection.TextSize = 13
+	autoFarmSection.Font = Enum.Font.SourceSansBold
+	autoFarmSection.Parent = mainFrame
+	
+	-- Farm Info Display
+	local farmInfoLabel = Instance.new("TextLabel")
+	farmInfoLabel.Name = "FarmInfo"
+	farmInfoLabel.Size = UDim2.new(1, -12, 0, 50)
+	farmInfoLabel.Position = UDim2.new(0, 6, 0, 60)
+	farmInfoLabel.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	farmInfoLabel.BorderSizePixel = 0
+	farmInfoLabel.Text = "Cycles: 0\nStatus: Ready\nBike: Not Boarded\nAction: Waiting..."
+	farmInfoLabel.TextColor3 = Color3.fromRGB(200, 255, 200)
+	farmInfoLabel.TextSize = 11
+	farmInfoLabel.Font = Enum.Font.SourceSans
+	farmInfoLabel.TextYAlignment = Enum.TextYAlignment.Top
+	farmInfoLabel.Parent = mainFrame
+	
+	-- Start/Stop Farm Button
+	local farmButton = Instance.new("TextButton")
+	farmButton.Name = "FarmButton"
+	farmButton.Size = UDim2.new(1, -20, 0, 40)
+	farmButton.Position = UDim2.new(0, 10, 0, 115)
+	farmButton.BackgroundColor3 = Color3.fromRGB(0, 150, 75)
+	farmButton.BorderSizePixel = 0
+	farmButton.Text = "🍕 START FARM"
+	farmButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	farmButton.TextSize = 14
+	farmButton.Font = Enum.Font.SourceSansBold
+	farmButton.Parent = mainFrame
+	
+	local farmCorner = Instance.new("UICorner")
+	farmCorner.CornerRadius = UDim.new(0, 6)
+	farmCorner.Parent = farmButton
+	
+	-- ===== SETTINGS SECTION =====
+	local settingsSection = Instance.new("TextLabel")
+	settingsSection.Name = "SettingsSection"
+	settingsSection.Size = UDim2.new(1, -12, 0, 25)
+	settingsSection.Position = UDim2.new(0, 6, 0, 165)
+	settingsSection.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
+	settingsSection.BorderSizePixel = 0
+	settingsSection.Text = "⚙️ SETTINGS"
+	settingsSection.TextColor3 = Color3.fromRGB(255, 255, 255)
+	settingsSection.TextSize = 13
+	settingsSection.Font = Enum.Font.SourceSansBold
+	settingsSection.Parent = mainFrame
+	
+	-- Auto Enter Status
+	local enterStatusLabel = Instance.new("TextLabel")
+	enterStatusLabel.Name = "EnterStatus"
+	enterStatusLabel.Size = UDim2.new(1, -12, 0, 20)
+	enterStatusLabel.Position = UDim2.new(0, 6, 0, 195)
+	enterStatusLabel.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	enterStatusLabel.BorderSizePixel = 0
+	enterStatusLabel.Text = "Auto Enter: OFF"
+	enterStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+	enterStatusLabel.TextSize = 10
+	enterStatusLabel.Font = Enum.Font.SourceSans
+	enterStatusLabel.Parent = mainFrame
+	
+	-- Height Status
+	local heightStatusLabel = Instance.new("TextLabel")
+	heightStatusLabel.Name = "HeightStatus"
+	heightStatusLabel.Size = UDim2.new(1, -12, 0, 20)
+	heightStatusLabel.Position = UDim2.new(0, 6, 0, 220)
+	heightStatusLabel.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	heightStatusLabel.BorderSizePixel = 0
+	heightStatusLabel.Text = "Height: Ready"
+	heightStatusLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+	heightStatusLabel.TextSize = 10
+	heightStatusLabel.Font = Enum.Font.SourceSans
+	heightStatusLabel.Parent = mainFrame
+	
+	-- Reset Bike Button
+	local resetButton = Instance.new("TextButton")
+	resetButton.Name = "ResetButton"
+	resetButton.Size = UDim2.new(1, -20, 0, 30)
+	resetButton.Position = UDim2.new(0, 10, 0, 245)
+	resetButton.BackgroundColor3 = Color3.fromRGB(100, 100, 200)
+	resetButton.BorderSizePixel = 0
+	resetButton.Text = "RESET BIKE STATUS"
+	resetButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	resetButton.TextSize = 12
+	resetButton.Font = Enum.Font.SourceSansBold
+	resetButton.Parent = mainFrame
+	
+	local resetCorner = Instance.new("UICorner")
+	resetCorner.CornerRadius = UDim.new(0, 6)
+	resetCorner.Parent = resetButton
+	
+	-- ===== UTILITY SECTION =====
+	local utilitySection = Instance.new("TextLabel")
+	utilitySection.Name = "UtilitySection"
+	utilitySection.Size = UDim2.new(1, -12, 0, 25)
+	utilitySection.Position = UDim2.new(0, 6, 0, 285)
+	utilitySection.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
+	utilitySection.BorderSizePixel = 0
+	utilitySection.Text = "🔧 UTILITY"
+	utilitySection.TextColor3 = Color3.fromRGB(255, 255, 255)
+	utilitySection.TextSize = 13
+	utilitySection.Font = Enum.Font.SourceSansBold
+	utilitySection.Parent = mainFrame
+	
+	-- Status Label
+	local statusLabel = Instance.new("TextLabel")
+	statusLabel.Name = "StatusLabel"
+	statusLabel.Size = UDim2.new(1, -12, 0, 25)
+	statusLabel.Position = UDim2.new(0, 6, 0, 315)
+	statusLabel.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	statusLabel.BorderSizePixel = 0
+	statusLabel.Text = "Status: Ready"
+	statusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	statusLabel.TextSize = 11
+	statusLabel.Font = Enum.Font.SourceSans
+	statusLabel.Parent = mainFrame
+	
+	-- Unload Button
+	local unloadButton = Instance.new("TextButton")
+	unloadButton.Name = "UnloadButton"
+	unloadButton.Size = UDim2.new(0.48, 0, 0, 30)
+	unloadButton.Position = UDim2.new(0.02, 0, 0, 345)
+	unloadButton.BackgroundColor3 = Color3.fromRGB(150, 0, 150)
+	unloadButton.BorderSizePixel = 0
+	unloadButton.Text = "UNLOAD"
+	unloadButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	unloadButton.TextSize = 11
+	unloadButton.Font = Enum.Font.SourceSansBold
+	unloadButton.Parent = mainFrame
+	
+	-- Rejoin Button
+	local rejoinButton = Instance.new("TextButton")
+	rejoinButton.Name = "RejoinButton"
+	rejoinButton.Size = UDim2.new(0.48, 0, 0, 30)
+	rejoinButton.Position = UDim2.new(0.5, 0, 0, 345)
+	rejoinButton.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
+	rejoinButton.BorderSizePixel = 0
+	rejoinButton.Text = "REJOIN"
+	rejoinButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	rejoinButton.TextSize = 11
+	rejoinButton.Font = Enum.Font.SourceSansBold
+	rejoinButton.Parent = mainFrame
+	
+	-- Credits
+	local creditsLabel = Instance.new("TextLabel")
+	creditsLabel.Name = "Credits"
+	creditsLabel.Size = UDim2.new(1, 0, 0, 18)
+	creditsLabel.Position = UDim2.new(0, 0, 1, -18)
+	creditsLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	creditsLabel.BorderSizePixel = 0
+	creditsLabel.Text = "Pizza Auto Farm v3.0"
+	creditsLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+	creditsLabel.TextSize = 9
+	creditsLabel.Font = Enum.Font.SourceSans
+	creditsLabel.Parent = mainFrame
+	
+	return mainFrame, farmInfoLabel, farmButton, enterStatusLabel, heightStatusLabel, 
+	       resetButton, statusLabel, unloadButton, rejoinButton, minimizeButton
+end
+
+-- ==================== NOCLIP SYSTEM ====================
+local noclipConnection = nil
+local antiSinkConnection = nil
+
+local function enableNoclip()
+	if state.noclipEnabled then return end
+	state.noclipEnabled = true
+	
+	noclipConnection = RunService.Stepped:Connect(function()
+		if not state.noclipEnabled then return end
+		local char = player.Character
+		if not char then return end
+		
+		for _, part in pairs(char:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.CanCollide = false
+			end
+		end
+	end)
+	
+	antiSinkConnection = RunService.Heartbeat:Connect(function()
+		if not state.noclipEnabled then return end
+		if not humanoidRootPart or not humanoidRootPart.Parent then return end
+		
+		local currentPos = humanoidRootPart.Position
+		
+		if currentPos.Y < 3 then
+			humanoidRootPart.CFrame = CFrame.new(currentPos.X, 4.5, currentPos.Z)
+		end
+		
+		if humanoidRootPart.AssemblyLinearVelocity then
+			local vel = humanoidRootPart.AssemblyLinearVelocity
+			if vel.Y < -5 then
+				humanoidRootPart.AssemblyLinearVelocity = Vector3.new(vel.X, 0, vel.Z)
+			end
+		end
+	end)
+end
+
+local function disableNoclip()
+	if not state.noclipEnabled then return end
+	state.noclipEnabled = false
+	
+	if noclipConnection then
+		noclipConnection:Disconnect()
+		noclipConnection = nil
+	end
+	
+	if antiSinkConnection then
+		antiSinkConnection:Disconnect()
+		antiSinkConnection = nil
+	end
+	
+	task.wait(0.1)
+	
+	local char = player.Character
+	if char then
+		for _, part in pairs(char:GetDescendants()) do
+			if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+				part.CanCollide = true
+			end
+		end
+		
+		if humanoid then
+			humanoid.PlatformStand = false
+		end
+	end
+end
+
+-- ==================== AUTO ENTER SYSTEM ====================
+local autoEnterConnection = nil
+
+local function enableAutoEnter()
+	if state.autoEnterEnabled then return end
+	state.autoEnterEnabled = true
+	
+	autoEnterConnection = task.spawn(function()
+		while state.autoEnterEnabled do
+			if state.stopped then break end
+			
+			pcall(function()
+				VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+				task.wait(0.03)
+				VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+			end)
+			
+			task.wait(CONFIG.enterPressDelay)
+		end
+	end)
+end
+
+local function disableAutoEnter()
+	if not state.autoEnterEnabled then return end
+	state.autoEnterEnabled = false
+	
+	if autoEnterConnection then
+		task.cancel(autoEnterConnection)
+		autoEnterConnection = nil
+	end
+end
+
+-- ==================== GUI CONTROL ====================
+local toggleCircle = createToggleCircle()
+local mainFrame, farmInfoLabel, farmButton, enterStatusLabel, heightStatusLabel, 
+      resetButton, statusLabel, unloadButton, rejoinButton, minimizeButton = createControlGUI()
+
+local function updateFarmInfo()
+	local bikeStatus = state.onBike and "Boarded ✓" or "Not Boarded"
+	local statusText = state.farming and (state.stopped and "Stopped" or "Farming") or "Ready"
+	
+	farmInfoLabel.Text = string.format(
+		"Cycles: %d\nStatus: %s\nBike: %s\nAction: %s",
+		state.currentCycle,
+		statusText,
+		bikeStatus,
+		farmInfoLabel.Text:match("Action: (.+)") or "Waiting..."
+	)
+end
+
+local function updateAction(text)
+	local currentText = farmInfoLabel.Text
+	farmInfoLabel.Text = currentText:gsub("Action: .+", "Action: " .. text)
+end
+
+local function updateEnterStatus()
+	if state.autoEnterEnabled then
+		enterStatusLabel.Text = "Auto Enter: ON ✓"
+		enterStatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+	else
+		enterStatusLabel.Text = "Auto Enter: OFF"
+		enterStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+	end
+end
+
+local function updateHeightStatus(text)
+	heightStatusLabel.Text = "Height: " .. text
+end
+
+local function toggleGUI()
+	state.guiMinimized = not state.guiMinimized
+	mainFrame.Visible = not state.guiMinimized
+	toggleCircle.Visible = state.guiMinimized
+	
+	if state.guiMinimized then
+		if state.farming then
+			toggleCircle.BackgroundColor3 = Color3.fromRGB(0, 150, 75)
+			toggleCircle.Text = "🍕"
+		else
+			toggleCircle.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
+			toggleCircle.Text = "🍕"
+		end
+	end
+end
+
+minimizeButton.MouseButton1Click:Connect(toggleGUI)
+toggleCircle.MouseButton1Click:Connect(toggleGUI)
+
+-- ==================== CORE FUNCTIONS ====================
+local function pressEKey(times, delay)
+	for i = 1, times do
+		if state.stopped then break end
+		
+		pcall(function()
+			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+			task.wait(0.03)
+			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+		end)
+		
+		if i < times then
+			task.wait(delay)
+		end
+	end
+end
+
+local function findCustomer()
+	local function searchRecursive(parent, depth)
+		if depth > CONFIG.maxSearchDepth then return nil end
+		
+		for _, obj in pairs(parent:GetChildren()) do
+			if state.stopped then return nil end
+			
+			if obj.Name == CONFIG.customerName then
+				return obj
+			end
+			
+			if obj:IsA("Model") or obj:IsA("Folder") then
+				local found = searchRecursive(obj, depth + 1)
+				if found then return found end
+			end
+		end
+		
+		return nil
+	end
+	
+	return searchRecursive(workspace, 0)
+end
+
+local function pressEUntilCustomerAppears()
+	local attempts = 0
+	local maxAttempts = CONFIG.maxRetryAttempts
+	
+	updateAction("Getting pizza...")
+	updateHeightStatus("Locked at pickup")
+	
+	lockPosition(CONFIG.pizzaPosition)
+	
+	while attempts < maxAttempts do
+		if state.stopped then 
+			unlockPosition()
+			return false 
+		end
+		
+		pressEKey(CONFIG.ePressCount, CONFIG.ePressDelay)
+		task.wait(CONFIG.waitAfterAction)
+		
+		attempts = attempts + 1
+		
+		local customer = findCustomer()
+		
+		if customer then
+			unlockPosition()
+			updateAction("✓ Pizza obtained!")
+			updateHeightStatus("Ready")
+			task.wait(0.2)
+			return true
+		end
+		
+		if attempts < maxAttempts then
+			task.wait(CONFIG.retryDelay)
+		end
+	end
+	
+	unlockPosition()
+	updateAction("⚠ Failed to get pizza")
+	updateHeightStatus("Ready")
+	return false
+end
+
+local function pressEUntilCustomerGoneWithHeightAdjust(customer)
+	if not customer then return false end
+	
+	local attempts = 0
+	local maxAttempts = CONFIG.maxRetryAttempts
+	local heightClimbs = 0
+	
+	updateAction("Delivering pizza...")
+	updateHeightStatus("At customer")
+	
+	while attempts < maxAttempts do
+		if state.stopped then return false end
+		
+		pressEKey(CONFIG.ePressCount, CONFIG.ePressDelay)
+		task.wait(CONFIG.waitAfterAction)
+		
+		attempts = attempts + 1
+		
+		local stillExists = false
+		if customer.Parent then
+			stillExists = true
+		else
+			local foundAgain = findCustomer()
+			if foundAgain then
+				customer = foundAgain
+				stillExists = true
+			end
+		end
+		
+		if not stillExists then
+			updateAction("✓ Pizza delivered!")
+			updateHeightStatus("Ready")
+			return true
+		end
+		
+		if attempts >= 2 and heightClimbs < CONFIG.maxHeightClimbs then
+			heightClimbs = heightClimbs + 1
+			
+			if humanoidRootPart then
+				local currentPos = humanoidRootPart.Position
+				local newHeight = currentPos.Y + CONFIG.heightClimbStep
+				humanoidRootPart.CFrame = CFrame.new(currentPos.X, newHeight, currentPos.Z)
+				
+				updateHeightStatus(string.format("Climb %d/%d", heightClimbs, CONFIG.maxHeightClimbs))
+				updateAction("Climbing higher...")
+			end
+			
+			task.wait(0.2)
+			attempts = attempts - 1
+		else
+			if attempts < maxAttempts then
+				task.wait(CONFIG.retryDelay)
+			end
+		end
+	end
+	
+	updateAction("⚠ Failed to deliver")
+	updateHeightStatus("Failed")
+	return false
+end
+
+local function teleportTo(position)
+	if not humanoidRootPart then return false end
+	
+	humanoidRootPart.CFrame = CFrame.new(position)
+	if humanoidRootPart.AssemblyLinearVelocity then
+		humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+		humanoidRootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+	end
+	
+	return true
+end
+
+local function noclipWalkTo(targetPosition)
+	if not humanoidRootPart then return false end
+	
+	unlockPosition()
+	
+	updateAction("Walking...")
+	
+	local targetHeight = targetPosition.Y
+	updateHeightStatus(string.format("Y: %.1f", targetHeight))
+	
+	local workingTarget = Vector3.new(targetPosition.X, targetHeight, targetPosition.Z)
+	
+	while (humanoidRootPart.Position - workingTarget).Magnitude > 3 do
+		if state.stopped then return false end
+		
+		local currentPos = humanoidRootPart.Position
+		local direction = (workingTarget - currentPos).Unit
+		
+		local moveSpeed = CONFIG.walkSpeed * 0.1
+		local newPosition = currentPos + (direction * moveSpeed)
+		
+		humanoidRootPart.CFrame = CFrame.new(newPosition, newPosition + direction)
+		
+		if humanoidRootPart.AssemblyLinearVelocity then
+			humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+			humanoidRootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+		end
+		
+		if humanoid then
+			humanoid.PlatformStand = true
+		end
+		
+		task.wait(CONFIG.updateInterval)
+	end
+	
+	if humanoid then
+		humanoid.PlatformStand = false
+	end
+	
+	humanoidRootPart.CFrame = CFrame.new(workingTarget)
+	task.wait(0.1)
+	
+	updateHeightStatus("Arrived")
+	return true
+end
+
+local function getCustomerPosition(customer)
+	if customer:IsA("Model") then
+		local primaryPart = customer.PrimaryPart or customer:FindFirstChild("HumanoidRootPart") or customer:FindFirstChildWhichIsA("BasePart")
+		if primaryPart then
+			return primaryPart.Position
+		end
+	elseif customer:IsA("BasePart") then
+		return customer.Position
+	end
+	return nil
+end
+
+-- ==================== AUTO FARM SEQUENCE ====================
+local function farmCycle()
+	updateFarmInfo()
+	
+	unlockPosition()
+	
+	updateAction("→ Pizza pickup...")
+	if not teleportTo(CONFIG.pizzaPosition) then return false end
+	task.wait(0.2)
+	
+	if state.stopped then return false end
+	
+	if not pressEUntilCustomerAppears() then
+		updateAction("Failed to get pizza!")
+		return false
+	end
+	
+	unlockPosition()
+	
+	if not state.onBike then
+		if state.stopped then return false end
+		updateAction("→ Boarding bike...")
+		if not teleportTo(CONFIG.bikePosition) then return false end
+		task.wait(CONFIG.waitAfterAction)
+		
+		if state.stopped then return false end
+		pressEKey(CONFIG.ePressCount, CONFIG.ePressDelay)
+		task.wait(CONFIG.waitAfterAction)
+		
+		state.onBike = true
+		updateFarmInfo()
+	end
+	
+	if state.stopped then return false end
+	updateAction("Locating customer...")
+	local customer = findCustomer()
+	
+	if not customer then
+		updateAction("Customer disappeared!")
+		return false
+	end
+	
+	local customerPos = getCustomerPosition(customer)
+	if not customerPos then
+		updateAction("Cannot get customer position!")
+		return false
+	end
+	
+	local deliveryPos = customerPos + CONFIG.customerOffset
+	
+	if state.stopped then return false end
+	updateAction(string.format("→ Customer (Y: %.1f)", deliveryPos.Y))
+	if not noclipWalkTo(deliveryPos) then return false end
+	task.wait(CONFIG.waitAfterAction)
+	
+	if state.stopped then return false end
+	
+	if not pressEUntilCustomerGoneWithHeightAdjust(customer) then
+		updateAction("Failed to deliver!")
+		return false
+	end
+	
+	if state.stopped then return false end
+	updateAction("→ Returning...")
+	if not noclipWalkTo(CONFIG.pizzaPosition) then return false end
+	task.wait(CONFIG.deliveryCheckDelay)
+	
+	state.currentCycle = state.currentCycle + 1
+	return true
+end
+
+local function startAutoFarm()
+	if state.farming then
+		updateAction("Already farming!")
+		return
+	end
+	
+	state.farming = true
+	state.stopped = false
+	statusLabel.Text = "Status: Farming"
+	statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+	
+	farmButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+	farmButton.Text = "⏹️ STOP FARM"
+	
+	if not mainFrame.Visible then
+		toggleCircle.BackgroundColor3 = Color3.fromRGB(0, 150, 75)
+	end
+	
+	enableNoclip()
+	enableAutoEnter()
+	updateEnterStatus()
+	
+	task.spawn(function()
+		while state.farming and not state.stopped do
+			local success = farmCycle()
+			
+			if not success or state.stopped then
+				break
+			end
+			
+			updateFarmInfo()
+			task.wait(0.3)
+		end
+		
+		unlockPosition()
+		disableNoclip()
+		disableAutoEnter()
+		updateEnterStatus()
+		updateHeightStatus("Ready")
+		state.farming = false
+		
+		farmButton.BackgroundColor3 = Color3.fromRGB(0, 150, 75)
+		farmButton.Text = "🍕 START FARM"
+		
+		if not mainFrame.Visible then
+			toggleCircle.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
+		end
+		
+		if state.stopped then
+			statusLabel.Text = "Status: Stopped"
+			statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+			updateAction("Farming stopped")
+		else
+			statusLabel.Text = "Status: Complete"
+			statusLabel.TextColor3 = Color3.fromRGB(100, 255, 255)
+			updateAction("Cycle ended")
+		end
+	end)
+end
+
+local function stopAutoFarm()
+	state.stopped = true
+	state.farming = false
+	unlockPosition()
+	disableNoclip()
+	disableAutoEnter()
+	updateEnterStatus()
+end
+
+local function rejoinServer()
+	updateAction("Rejoining...")
+	statusLabel.Text = "Status: Rejoining"
+	statusLabel.TextColor3 = Color3.fromRGB(255, 165, 0)
+	
+	if state.farming then
+		stopAutoFarm()
+	end
+	
+	task.wait(0.5)
+	
+	pcall(function()
+		TeleportService:Teleport(game.PlaceId, player)
+	end)
+end
+
+local function unloadScript()
+	updateAction("Unloading...")
+	statusLabel.Text = "Status: Unloading"
+	
+	if state.farming then
+		stopAutoFarm()
+	end
+	
+	unlockPosition()
+	disableNoclip()
+	disableAutoEnter()
+	
+	task.wait(0.2)
+	
+	if playerGui:FindFirstChild("PizzaAutoFarmGUI") then
+		playerGui.PizzaAutoFarmGUI:Destroy()
+	end
+	
+	if playerGui:FindFirstChild("ToggleCircleGUI") then
+		playerGui.ToggleCircleGUI:Destroy()
+	end
+	
+	print("✅ Script unloaded!")
+end
+
+-- ==================== BUTTON HANDLERS ====================
+farmButton.MouseButton1Click:Connect(function()
+	if not state.farming then
+		startAutoFarm()
+	else
+		stopAutoFarm()
+	end
+end)
+
+resetButton.MouseButton1Click:Connect(function()
+	state.onBike = false
+	updateFarmInfo()
+	updateAction("Bike status reset")
+	statusLabel.Text = "Status: Bike Reset"
+end)
+
+rejoinButton.MouseButton1Click:Connect(rejoinServer)
+unloadButton.MouseButton1Click:Connect(unloadScript)
+
+-- ==================== CHARACTER RESPAWN ====================
+player.CharacterAdded:Connect(function(newCharacter)
+	character = newCharacter
+	humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+	humanoid = character:WaitForChild("Humanoid")
+	
+	state.farming = false
+	state.stopped = false
+	state.noclipEnabled = false
+	state.onBike = false
+	state.currentCycle = 0
+	state.autoEnterEnabled = false
+	state.positionLocked = false
+	
+	unlockPosition()
+	
+	if noclipConnection then
+		noclipConnection:Disconnect()
+		noclipConnection = nil
+	end
+	
+	if antiSinkConnection then
+		antiSinkConnection:Disconnect()
+		antiSinkConnection = nil
+	end
+	
+	if autoEnterConnection then
+		task.cancel(autoEnterConnection)
+		autoEnterConnection = nil
+	end
+	
+	statusLabel.Text = "Status: Ready"
+	statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+	updateFarmInfo()
+	updateEnterStatus()
+	updateHeightStatus("Ready")
+	updateAction("Ready to farm")
+	
+	farmButton.BackgroundColor3 = Color3.fromRGB(0, 150, 75)
+	farmButton.Text = "🍕 START FARM"
+end)
+
+-- ==================== INITIALIZATION ====================
+statusLabel.Text = "Status: Ready"
+statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+updateFarmInfo()
+updateEnterStatus()
+updateHeightStatus("Ready")
+updateAction("Press START FARM to begin")
+
+print("✅ Pizza Auto Farm - Redesigned GUI v3.0")
+print("🎨 Modern layout with organized sections")
+print("📌 Press START FARM to begin!")
